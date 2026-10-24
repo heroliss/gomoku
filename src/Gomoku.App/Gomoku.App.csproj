@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationDefaultFont>Microsoft YaHei UI, 9.5pt</ApplicationDefaultFont>
+    <AssemblyName>Liss.Gomoku</AssemblyName>
+    <RootNamespace>Liss.Gomoku.App</RootNamespace>
+    <Version>3.0.0</Version>
+    <Product>Liss Gomoku</Product>
+    <ApplicationIcon>Assets/gomoku.ico</ApplicationIcon>
+    <Company>Liss</Company>
+    <Description>Freestyle Gomoku, classic search engines and online matches.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Gomoku.Core/Gomoku.Core.csproj" />
+    <ProjectReference Include="../Gomoku.Networking/Gomoku.Networking.csproj" />
+  </ItemGroup>
+</Project>
