@@ -14,29 +14,29 @@ internal sealed class MainForm : Form
     private readonly Label _footer = Theme.Label("准备就绪");
     private readonly Label _diagnostics = Theme.Label("尚未搜索\n选择引擎，开始一局或请求提示。", 10);
     private readonly Label _engineDescription = Theme.Label("");
-    private readonly Label _connection = Theme.Label("尚未连接");
+    private readonly NetworkLobbyControl _lobby = new() { Dock = DockStyle.Fill };
     private readonly ComboBox _mode = Theme.Combo(), _size = Theme.Combo();
     private readonly EngineSettingsControl _blackSettings = new("黑方"), _whiteSettings = new("白方");
     private readonly SearchStatisticsControl _statistics = new();
     private readonly Button[] _sideTabs = new Button[2];
-    private readonly ListBox _history = new(), _rooms = new();
-    private readonly TextBox _nickname = Theme.Input("Liss"), _roomName = Theme.Input("Liss 的棋室");
+    private readonly ListBox _history = new();
     private readonly Panel[] _pages = [new(), new(), new(), new()];
     private readonly Button[] _tabs = new Button[4];
-    private readonly Button _newGame, _undo, _hint, _pause, _leave;
+    private readonly Button _newGame, _undo, _hint, _pause, _openGame;
     private readonly PhotonLobbyService _network = new();
     private readonly System.Windows.Forms.Timer _networkTimer = new() { Interval = 30 };
     private CancellationTokenSource? _search;
     private int _generation;
     private int? _autoplayStopAt;
     private bool _thinking, _paused, _closing, _online, _reviewing, _updatingHistory, _initializing = true;
+    private bool _networkVisited, _networkBoard, _networkTransitionOwnsBoard;
     private readonly bool _showcase;
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 350 };
 
     internal MainForm(bool showcase, string[]? startupArgs = null)
     {
         _showcase = showcase;
-        Text = "Liss Gomoku · 五子棋 v3.1";
+        Text = "Liss Gomoku · 五子棋 v3.2";
         ClientSize = new Size(1280, 840);
         MinimumSize = new Size(1060, 790);
         StartPosition = FormStartPosition.CenterScreen;
@@ -47,7 +47,7 @@ internal sealed class MainForm : Form
         _undo = Theme.Button("悔棋", (_, _) => UndoMove());
         _hint = Theme.Button("提示", async (_, _) => await Think(true));
         _pause = Theme.Button("暂停", (_, _) => TogglePause());
-        _leave = Theme.Button("离开房间", (_, _) => LeaveRoom());
+        _openGame = Theme.Button("打开", (_, _) => OpenGame());
         BuildLayout();
         BindNetwork();
         _board.PlayRequested += PlayHuman;
@@ -57,7 +57,6 @@ internal sealed class MainForm : Form
         _blackSettings.ProfileChanged += ProfileChanged;
         _whiteSettings.ProfileChanged += ProfileChanged;
         _history.SelectedIndexChanged += (_, _) => { if (!_updatingHistory && _history.SelectedIndex >= 0) ReviewTo(_history.SelectedIndex + 1); };
-        _rooms.DoubleClick += (_, _) => JoinSelectedRoom();
         if (!showcase)
         {
             var preferences = EnginePreferencesStore.Load(PreferencesPath);
@@ -68,7 +67,7 @@ internal sealed class MainForm : Form
         ApplyStartupOptions(startupArgs ?? []);
         _initializing = false;
         RefreshGame(showcase ? "真实中盘局面 · 可自由继续落子与试用引擎" : "准备就绪 · 点击棋盘落子");
-        Shown += async (_, _) => { if ((startupArgs ?? []).Contains("--hint")) await Think(true); else ScheduleComputer(); };
+        Shown += async (_, _) => { if (_pages[3].Visible) EnterLobbyOnce(); if ((startupArgs ?? []).Contains("--hint")) await Think(true); else ScheduleComputer(); };
     }
 
     private void BuildLayout()
@@ -82,10 +81,9 @@ internal sealed class MainForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 570));
         header.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); header.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
         header.Controls.Add(Theme.Label("GOMOKU", 25, true), 0, 0);
-        header.Controls.Add(Theme.Label("LISS  /  五子棋与搜索实验  /  v3.1", 9), 0, 1);
-        var open = Theme.Button("打开", (_, _) => OpenGame());
+        header.Controls.Add(Theme.Label("LISS  /  五子棋与搜索实验  /  v3.2", 9), 0, 1);
         var save = Theme.Button("保存", (_, _) => SaveGame());
-        var actions = Theme.Buttons(_newGame, _undo, _hint, _pause, open, save);
+        var actions = Theme.Buttons(_newGame, _undo, _hint, _pause, _openGame, save);
         foreach (Control button in actions.Controls) button.Width = 84;
         header.Controls.Add(actions, 1, 0); header.SetRowSpan(actions, 2);
         actions.Padding = new Padding(0, 20, 0, 0);
@@ -183,18 +181,13 @@ internal sealed class MainForm : Form
 
     private void BuildNetworkPage()
     {
-        var stack = Theme.Stack(); _pages[3].Controls.Add(stack);
-        AddField(stack, "昵称", _nickname);
-        var connect = Theme.Button("连接大厅", (_, _) => NetworkAction(() => _network.Connect(_nickname.Text)), true); connect.Width = 130;
-        _leave.Width = 130;
-        Theme.AddRow(stack, Theme.Buttons(connect, _leave), 46);
-        _connection.ForeColor = Theme.Accent; Theme.AddRow(stack, _connection, 54);
-        AddField(stack, "新房间名称", _roomName);
-        var create = Theme.Button("创建房间", (_, _) => NetworkAction(() => { CancelSearch(); _paused = true; _network.CreateRoom(_roomName.Text, _size.SelectedIndex == 1 ? 19 : 15); })); create.Width = 130;
-        var join = Theme.Button("加入所选", (_, _) => JoinSelectedRoom()); join.Width = 130;
-        Theme.AddRow(stack, Theme.Buttons(create, join), 46);
-        StyleList(_rooms); _rooms.DisplayMember = nameof(RoomListing.Name); Theme.AddRow(stack, _rooms, 160);
-        Theme.AddRow(stack, Theme.Label("Photon · Asia · 双人实时对局\n房主执黑；悔棋退两手，重开与悔棋均需同意。\nv3 使用独立房间协议，请双方使用同一版本。", 8.5f), 76);
+        _pages[3].Controls.Add(_lobby);
+        _lobby.ConnectRequested += (_, _) => NetworkAction(() => _network.Connect(_lobby.Nickname));
+        _lobby.DisconnectRequested += (_, _) => NetworkAction(_network.Disconnect);
+        _lobby.CancelRequested += (_, _) => NetworkAction(_network.CancelPendingOperation);
+        _lobby.CreateRequested += (_, _) => NetworkAction(() => _network.ConnectAndCreateRoom(_lobby.Nickname, _lobby.NewRoomName, _size.SelectedIndex == 1 ? 19 : 15));
+        _lobby.JoinRequested += (_, _) => JoinSelectedRoom();
+        _lobby.LeaveRequested += (_, _) => LeaveRoom();
     }
 
     private static void StyleList(ListBox list)
@@ -215,7 +208,20 @@ internal sealed class MainForm : Form
             _tabs[i].FlatAppearance.MouseOverBackColor = i == index ? Color.FromArgb(150, 235, 219) : Color.FromArgb(36, 53, 72);
             _tabs[i].FlatAppearance.MouseDownBackColor = _tabs[i].FlatAppearance.MouseOverBackColor;
         }
+        if (index == 3 && !_initializing) EnterLobbyOnce();
     }
+
+    private void EnterLobbyOnce()
+    {
+        if (_networkVisited || _closing) return;
+        _networkVisited = true;
+        if (_network.Snapshot.CanConnect) NetworkAction(() => _network.Connect(_lobby.Nickname));
+    }
+
+    private bool NetworkOwnsBoard => _network.Snapshot.PendingOperation != LobbyPendingOperation.None
+        || _network.Snapshot.Phase is LobbyPhase.CreatingRoom or LobbyPhase.JoiningRoom or LobbyPhase.RoomWaiting
+            or LobbyPhase.Match or LobbyPhase.LeavingRoom
+        || _network.Snapshot.Phase == LobbyPhase.Disconnecting && _networkTransitionOwnsBoard;
     private void ShowEngineDescription()
     {
         static string Describe(string side, SearchProfile profile) =>
@@ -237,7 +243,7 @@ internal sealed class MainForm : Form
 
     private void PlayHuman(int x, int y)
     {
-        if (_closing || _thinking || _game.IsFinished || !HumanTurn || (_online && _network.HasPendingRequest)) return;
+        if (_closing || _thinking || _game.IsFinished || !HumanTurn || NetworkOwnsBoard && !_online || (_online && _network.HasPendingRequest)) return;
         if (!_game.TryPlay(x, y)) return;
         // Replaying a former AI coordinate by hand is a new human decision, not a Redo.
         _analysis.DiscardFrom(_game.Cursor);
@@ -250,12 +256,12 @@ internal sealed class MainForm : Form
     }
     private void ScheduleComputer()
     {
-        if (!_closing && IsHandleCreated && !_paused && !_reviewing && !_online && !_thinking && !_game.IsFinished && !HumanTurn)
+        if (!_closing && IsHandleCreated && !_paused && !_reviewing && !NetworkOwnsBoard && !_online && !_thinking && !_game.IsFinished && !HumanTurn)
             BeginInvoke(async () => await Think(false));
     }
     private async Task Think(bool hintOnly)
     {
-        if (_closing || _online || _thinking || _game.IsFinished || (!hintOnly && (_paused || _reviewing || HumanTurn))) return;
+        if (_closing || NetworkOwnsBoard || _online || _thinking || _game.IsFinished || (!hintOnly && (_paused || _reviewing || HumanTurn))) return;
         CancelSearch();
         int generation = _generation; int cursor = _game.Cursor;
         var snapshot = _game.Clone();
@@ -295,16 +301,16 @@ internal sealed class MainForm : Form
     { _generation++; _search?.Cancel(); _search = null; _thinking = false; }
     private void TogglePause()
     {
-        if (_online) return;
+        if (_online || NetworkOwnsBoard) return;
         if (_thinking || !_paused) { CancelSearch(); _paused = true; RefreshGame("已暂停 · 可以回看棋谱或调整引擎"); }
         else { _paused = false; _reviewing = false; RefreshGame(); ScheduleComputer(); }
     }
     private void NewGame()
     {
         if (_online) { NetworkAction(_network.RequestRestart); return; }
-        if (_network.InRoom) { RefreshGame("请先离开房间再开始本地对局"); return; }
+        if (NetworkOwnsBoard) { RefreshGame("请先返回大厅，或取消当前联机操作，再开始本地对局"); return; }
         CancelSearch(); _game = new GameBoard(_size.SelectedIndex == 1 ? 19 : 15); _analysis = new();
-        _autoplayStopAt = null;
+        _autoplayStopAt = null; _networkBoard = false;
         _board.Board = _game; _paused = false; _reviewing = false;
         _diagnostics.Text = "尚未搜索\n选择引擎，开始一局或请求提示。";
         RefreshGame(); Persist(); ScheduleComputer();
@@ -312,6 +318,7 @@ internal sealed class MainForm : Form
     private void UndoMove()
     {
         if (_online) { if (_game.Cursor > 0) NetworkAction(_network.RequestUndo); return; }
+        if (NetworkOwnsBoard) { RefreshGame(_network.Snapshot.Message); return; }
         CancelSearch();
         int count = _mode.SelectedIndex is 0 or 1 && HumanTurn && _game.Cursor >= 2 ? 2 : 1;
         _game.Undo(count); _paused = true; _reviewing = false; _board.HintMove = null;
@@ -319,7 +326,7 @@ internal sealed class MainForm : Form
     }
     private void ReviewTo(int cursor)
     {
-        if (_online || _network.InRoom) { RefreshGame("联机过程中暂不回看，保存棋谱后可离线查看"); return; }
+        if (_online || NetworkOwnsBoard) { RefreshGame("联机房间内暂不回看，保存棋谱后可离线查看"); return; }
         CancelSearch(); cursor = Math.Clamp(cursor, 0, _game.Moves.Count);
         if (cursor < _game.Cursor) _game.Undo(_game.Cursor - cursor);
         else while (_game.Cursor < cursor && _game.Redo()) { }
@@ -335,6 +342,18 @@ internal sealed class MainForm : Form
         _turn.Text = _game.IsDraw ? "和棋" : _game.Winner != Stone.空 ? (_game.Winner == Stone.黑子 ? "黑方获胜" : "白方获胜") : (_game.BlackToMove ? "黑方行棋" : "白方行棋");
         _turn.ForeColor = _game.IsFinished ? Theme.Accent : Theme.Text;
         _position.Text = $"{_game.Size} × {_game.Size}    ·    第 {_game.Cursor + (_game.IsFinished ? 0 : 1)} 手" + (_online ? "    ·    联机" : _reviewing ? "    ·    回看" : "    ·    自由规则");
+        if (NetworkOwnsBoard && !_online)
+        {
+            _turn.ForeColor = Theme.Text;
+            _turn.Text = _network.Snapshot.Phase switch
+            {
+                LobbyPhase.RoomWaiting => "等待对手",
+                LobbyPhase.LeavingRoom => "正在返回大厅",
+                LobbyPhase.Disconnecting => "正在断开连接",
+                _ => "正在准备联机"
+            };
+            _position.Text = _network.Snapshot.Phase == LobbyPhase.RoomWaiting ? "联机房间 · 1 / 2 人" : "当前棋谱保留 · 暂不落子";
+        }
         _updatingHistory = true; _history.BeginUpdate(); _history.Items.Clear();
         for (int i = 0; i < _game.Moves.Count; i++)
         {
@@ -342,32 +361,46 @@ internal sealed class MainForm : Form
         }
         _history.SelectedIndex = _game.Cursor - 1; _history.EndUpdate(); _updatingHistory = false;
         if (message is not null) _footer.Text = message;
-        else _footer.Text = _game.IsFinished ? "本局结束 · 可回看棋谱、保存或开始新局" : _online ? $"房间 {_network.RoomName} · 你执{(_network.IsLocalBlack ? "黑" : "白")} · 对手 {_network.OpponentName}" : _paused ? "已暂停 · 可调整参数，点击继续" : "方向键与 Enter 也可落子 · Ctrl+Z 悔棋 · Ctrl+S 保存";
+        else _footer.Text = NetworkOwnsBoard && !_online ? _network.Snapshot.Message : _online ? $"房间 {_network.RoomName} · 你执{(_network.IsLocalBlack ? "黑" : "白")} · 对手 {_network.OpponentName}" : _game.IsFinished ? "本局结束 · 可回看棋谱、保存或开始新局" : _paused ? "已暂停 · 可调整参数，点击继续" : "方向键与 Enter 也可落子 · Ctrl+Z 悔棋 · Ctrl+S 保存";
         ShowEngineDescription(); UpdateInteraction();
     }
     private void UpdateInteraction()
     {
         bool pending = _online && _network.HasPendingRequest;
-        _board.InputEnabled = !_thinking && !_game.IsFinished && HumanTurn && !pending && (!_network.InRoom || _online);
-        _newGame.Enabled = !pending; _undo.Enabled = _game.Cursor > 0 && !pending;
-        _hint.Enabled = !_online && !_network.InRoom && !_thinking && !_game.IsFinished;
-        _pause.Enabled = !_online && !_network.InRoom; _pause.Text = _paused ? "继续" : _thinking ? "停止" : "暂停";
-        _mode.Enabled = !_online && !_network.InRoom; _size.Enabled = !_network.InRoom;
-        _leave.Enabled = _network.InRoom;
+        bool localAllowed = !NetworkOwnsBoard && !_online;
+        bool input = !_thinking && !_game.IsFinished && HumanTurn && !pending && (localAllowed || _online);
+        if (_board.InputEnabled != input) { _board.InputEnabled = input; _board.Invalidate(); }
+        _newGame.Enabled = !pending && (localAllowed || _online); _undo.Enabled = _game.Cursor > 0 && !pending && (localAllowed || _online);
+        _newGame.Text = _online ? "请求重开" : "新对局"; _undo.Text = _online ? "请求悔棋" : "悔棋";
+        _hint.Enabled = localAllowed && !_thinking && !_game.IsFinished;
+        _pause.Enabled = localAllowed; _pause.Text = _paused ? "继续" : _thinking ? "停止" : "暂停";
+        _mode.Enabled = localAllowed; _size.Enabled = localAllowed; _openGame.Enabled = localAllowed;
+        _board.InteractionNotice = !NetworkOwnsBoard || _online ? null : _network.Snapshot.Phase switch
+        {
+            LobbyPhase.RoomWaiting => "等待对手加入\n当前棋谱保留，双方就绪后开始新对局",
+            LobbyPhase.LeavingRoom => "正在返回大厅\n当前棋谱保留，稍后可继续本地对局",
+            LobbyPhase.Disconnecting => "正在断开连接\n当前棋谱保留，请稍候",
+            _ => "正在准备联机\n当前棋谱保留，可在联机页取消"
+        };
+        _lobby.SetState(_network.Snapshot, _network.Snapshot.Phase == LobbyPhase.RoomWaiting ? _network.IsHost : _network.IsLocalBlack,
+            _network.OpponentName, pending, _game.IsFinished);
     }
     private void OpenGame()
     {
-        if (_network.InRoom) { RefreshGame("请先离开房间再打开棋谱"); return; }
+        if (NetworkOwnsBoard) { RefreshGame("请先返回大厅，或取消当前联机操作，再打开棋谱"); return; }
         using var dialog = new OpenFileDialog { Title = "打开五子棋棋谱", Filter = "五子棋棋谱 (*.json;*.sgf)|*.json;*.sgf", CheckFileExists = true };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { var saved = SessionFiles.Load(dialog.FileName); CancelSearch(); _game = saved.Board; _analysis = new(); _mode.SelectedIndex = saved.Mode; _paused = true; _reviewing = _game.Cursor < _game.Moves.Count; _diagnostics.Text = "尚未搜索\n读档后从新的 AI 决策开始统计。"; RefreshGame("棋谱已打开 · 点击继续或自由回看"); Persist(); }
+        if (NetworkOwnsBoard) { RefreshGame("联机状态已变化，保留当前对局；返回大厅后再打开棋谱"); return; }
+        try { var saved = SessionFiles.Load(dialog.FileName); CancelSearch(); _game = saved.Board; _analysis = new(); _networkBoard = false; _mode.SelectedIndex = saved.Mode; _paused = true; _reviewing = _game.Cursor < _game.Moves.Count; _diagnostics.Text = "尚未搜索\n读档后从新的 AI 决策开始统计。"; RefreshGame("棋谱已打开 · 点击继续或自由回看"); Persist(); }
         catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException) { MessageBox.Show(this, e.Message, "无法打开棋谱", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
     private void SaveGame()
     {
+        // File dialogs keep pumping network events. Export the position selected when saving began.
+        var snapshot = _game.Clone(); int mode = _online ? 2 : _mode.SelectedIndex;
         using var dialog = new SaveFileDialog { Title = "保存棋谱", Filter = "完整棋谱 (*.json)|*.json|SGF 主线棋谱 (*.sgf)|*.sgf", FileName = "gomoku-" + DateTime.Now.ToString("yyyyMMdd-HHmm"), AddExtension = true };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { if (Path.GetExtension(dialog.FileName).Equals(".sgf", StringComparison.OrdinalIgnoreCase)) SessionFiles.SaveSgf(dialog.FileName, _game); else SessionFiles.Save(dialog.FileName, _game, _online ? 2 : _mode.SelectedIndex); RefreshGame("棋谱已保存"); }
+        try { if (Path.GetExtension(dialog.FileName).Equals(".sgf", StringComparison.OrdinalIgnoreCase)) SessionFiles.SaveSgf(dialog.FileName, snapshot); else SessionFiles.Save(dialog.FileName, snapshot, mode); RefreshGame("已保存打开保存窗口时的棋谱快照"); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { MessageBox.Show(this, e.Message, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
     private void Persist()
@@ -419,19 +452,24 @@ internal sealed class MainForm : Form
 
     private void BindNetwork()
     {
-        _network.StatusChanged += status => { _connection.Text = status; _footer.Text = status; };
-        _network.RoomsChanged += rooms =>
+        _network.StateChanged += state =>
         {
-            string? selected = (_rooms.SelectedItem as RoomListing)?.Name;
-            _rooms.BeginUpdate(); _rooms.Items.Clear(); foreach (var room in rooms) _rooms.Items.Add(room);
-            for (int i = 0; i < _rooms.Items.Count; i++) if (((RoomListing)_rooms.Items[i]).Name == selected) _rooms.SelectedIndex = i;
-            _rooms.EndUpdate();
+            if (_closing) return;
+            if (state.PendingOperation != LobbyPendingOperation.None || state.Phase is LobbyPhase.CreatingRoom
+                or LobbyPhase.JoiningRoom or LobbyPhase.RoomWaiting or LobbyPhase.Match or LobbyPhase.LeavingRoom)
+                _networkTransitionOwnsBoard = true;
+            else if (state.Phase is LobbyPhase.Disconnected or LobbyPhase.Error or LobbyPhase.Lobby)
+                _networkTransitionOwnsBoard = false;
+            if (NetworkOwnsBoard) { CancelSearch(); _paused = true; _board.HintMove = null; }
+            if (state.Phase != LobbyPhase.Match && _online) RetainOnlineGameLocally();
+            RefreshGame(state.Message);
         };
-        _network.MatchStarted += match => { CancelSearch(); _online = true; _paused = true; _reviewing = false; _game = new GameBoard(match.BoardSize); _analysis = new(); _diagnostics.Text = "联机对局\n手动落子不计入 AI 思考统计。"; RefreshGame(); };
+        _network.RoomsChanged += rooms => _lobby.SetRooms(rooms);
+        _network.MatchStarted += match => { CancelSearch(); _online = true; _networkBoard = true; _paused = true; _reviewing = false; _game = new GameBoard(match.BoardSize); _analysis = new(); _diagnostics.Text = "联机对局\n手动落子不计入 AI 思考统计。"; RefreshGame(); };
         _network.MoveReceived += move =>
         {
             if (!_online || _game.BlackToMove == _network.IsLocalBlack || move.Ply != _game.Cursor + 1 || !_game.TryPlay(move.X, move.Y))
-            { LeaveRoom(); RefreshGame("收到不一致的棋局，已离开房间；可保存当前棋谱"); return; }
+            { LeaveRoom(); RefreshGame("收到不一致的棋局，正在返回大厅；当前棋谱保留"); return; }
             _board.HintMove = null; RefreshGame(); Persist();
         };
         _network.RequestReceived += kind =>
@@ -450,20 +488,33 @@ internal sealed class MainForm : Form
             if (accepted) { if (kind == "restart") { _game.Reset(); _analysis = new(); } else _game.Undo(2); _board.HintMove = null; RefreshGame(); Persist(); }
             else RefreshGame("请求未获同意或已超时，棋局保持原样");
         };
-        _network.OpponentLeft += () => { _online = false; _paused = true; RefreshGame("对手已离开 · 可保存棋谱；离开房间后可继续本地对局"); };
+        _network.OpponentLeft += () =>
+        {
+            RetainOnlineGameLocally();
+            RefreshGame(_network.Snapshot.Phase == LobbyPhase.RoomWaiting
+                ? "对手已离开 · 等待下一位对手；也可返回大厅，保留棋谱继续本地对局"
+                : _network.Snapshot.Message);
+        };
+    }
+    private void RetainOnlineGameLocally()
+    {
+        bool wasNetworkGame = _networkBoard || _online;
+        _online = false; _networkBoard = false; _paused = true; CancelSearch();
+        if (wasNetworkGame) { _mode.SelectedIndex = 2; Persist(); }
     }
     private void NetworkAction(Action action)
     {
-        try { action(); UpdateInteraction(); }
-        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { RefreshGame(e.Message); }
+        if (_closing) return;
+        try { action(); RefreshGame(_network.Snapshot.Message); }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { _lobby.ShowValidationError(e.Message); RefreshGame(e.Message); }
     }
     private void JoinSelectedRoom()
     {
-        if (_rooms.SelectedItem is not RoomListing room) { RefreshGame("请先在列表中选择房间"); return; }
-        CancelSearch(); _paused = true; NetworkAction(() => _network.JoinRoom(room.Name));
+        if (_lobby.SelectedRoom is not RoomListing room || room.Players >= room.Capacity) { RefreshGame("请选择一个有空位的房间"); return; }
+        NetworkAction(() => _network.ConnectAndJoinRoom(_lobby.Nickname, room.Name));
     }
     private void LeaveRoom()
-    { _online = false; _paused = true; CancelSearch(); NetworkAction(_network.LeaveRoom); RefreshGame("已离开联机对局 · 棋谱保留为本地局面"); }
+    { RetainOnlineGameLocally(); NetworkAction(_network.LeaveRoom); }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
@@ -473,7 +524,10 @@ internal sealed class MainForm : Form
             case Keys.Control | Keys.Z: if (_undo.Enabled) UndoMove(); return true;
             case Keys.Control | Keys.S: SaveGame(); return true;
             case Keys.Control | Keys.O: OpenGame(); return true;
-            case Keys.Escape: CancelSearch(); _paused = true; RefreshGame("已暂停"); return true;
+            case Keys.Escape:
+                if (_network.Snapshot.CanCancel && (_pages[3].Visible || NetworkOwnsBoard)) { NetworkAction(_network.CancelPendingOperation); return true; }
+                if (_online || NetworkOwnsBoard) { RefreshGame("联机对局不会暂停；请在联机页返回大厅或等待当前请求完成"); return true; }
+                CancelSearch(); _paused = true; RefreshGame("本地对局已暂停"); return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
     }

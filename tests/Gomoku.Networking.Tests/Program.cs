@@ -3,6 +3,7 @@ using System.Text.Json;
 using Liss.Gomoku.Networking;
 
 var checks = new List<object>();
+object? liveDetails = null;
 void Check(string name, bool result)
 {
     checks.Add(new { name, passed = result });
@@ -22,17 +23,31 @@ using (var local = new PhotonLobbyService())
     Rejects<ArgumentException>("control nickname rejected", () => local.Connect("a\nb"));
     Rejects<ArgumentException>("room name bounded", () => local.CreateRoom(new string('x', 49)));
     Rejects<ArgumentOutOfRangeException>("invalid board rejected", () => local.CreateRoom("unit", 14));
+    Rejects<ArgumentException>("automatic create validates nickname before connecting", () => local.ConnectAndCreateRoom("", "own-room"));
+    Rejects<ArgumentException>("automatic join validates room before connecting", () => local.ConnectAndJoinRoom("player", "\n"));
+    Rejects<ArgumentOutOfRangeException>("automatic create validates board before connecting", () => local.ConnectAndCreateRoom("player", "own-room", 20));
+    Check("invalid automatic actions leave disconnected snapshot untouched", local.Snapshot.Phase == LobbyPhase.Disconnected && local.Snapshot.CanCreateOrJoin);
     Exception? wrongThread = null;
     var thread = new Thread(() => { try { local.Service(); } catch (Exception e) { wrongThread = e; } });
     thread.Start(); thread.Join();
     Check("wrong thread rejected", wrongThread is InvalidOperationException);
+    wrongThread = null;
+    var actionThread = new Thread(() => { try { local.ConnectAndJoinRoom("player", "own-room"); } catch (Exception e) { wrongThread = e; } });
+    actionThread.Start(); actionThread.Join();
+    Check("automatic room action enforces owner thread", wrongThread is InvalidOperationException);
     local.LeaveRoom(); Check("offline move reports failure", !local.SendMove(0, 0, 1)); local.RequestUndo(); local.ReplyRequest(true);
     Check("offline operations safe", !local.InRoom);
+    int snapshots = 0, ownerThread = Environment.CurrentManagedThreadId;
+    local.StateChanged += _ => throw new InvalidOperationException("intentional state subscriber test");
+    local.StateChanged += state => { if (state.Phase == LobbyPhase.Disconnected && Environment.CurrentManagedThreadId == ownerThread) snapshots++; };
+    local.Disconnect();
+    Check("public structured snapshots isolate subscribers on owner thread", snapshots == 1);
     local.Dispose(); local.Dispose(); local.Service();
     Rejects<ObjectDisposedException>("disposed use rejected", () => local.Connect("unit"));
 }
 Rejects<ArgumentException>("invalid AppId rejected", () => new PhotonLobbyService("not-an-app-id"));
 RequestProtocolChecks.Run(Check);
+LobbyWorkflowChecks.Run(Check);
 using (var failure = new PhotonLobbyService())
 {
     int disconnected = 0;
@@ -49,14 +64,23 @@ if (args.Contains("--live"))
     using var black = new PhotonLobbyService();
     using var white = new PhotonLobbyService();
     var blackThread = Environment.CurrentManagedThreadId;
-    bool lobbyA = false, lobbyB = false, startedA = false, startedB = false, opponentLeft = false;
+    bool startedA = false, startedB = false, opponentLeft = false, statesOnOwnerThread = true;
+    var phasesA = new List<LobbyPhase>();
+    var phasesB = new List<LobbyPhase>();
     int sizeA = 0, sizeB = 0, receivedA = 0, receivedB = 0, restartA = 0, restartB = 0, undoA = 0, undoB = 0, declinedA = 0, declinedB = 0;
     bool acceptRequests = true;
     bool automaticallyReply = true;
     string opponentA = "", opponentB = "";
     IReadOnlyList<RoomListing> roomsB = Array.Empty<RoomListing>();
-    black.StatusChanged += status => { Console.WriteLine("A " + status); if (status.Contains("大厅")) lobbyA = true; };
-    white.StatusChanged += status => { Console.WriteLine("B " + status); if (status.Contains("大厅")) lobbyB = true; };
+    string TransportState(PhotonLobbyService service)
+    {
+        var client = typeof(PhotonLobbyService).GetField("_client", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(service)!;
+        return client.GetType().GetProperty("State")!.GetValue(client)!.ToString()!;
+    }
+    black.StatusChanged += status => Console.WriteLine("A [" + TransportState(black) + "] " + status);
+    white.StatusChanged += status => Console.WriteLine("B [" + TransportState(white) + "] " + status);
+    black.StateChanged += state => { phasesA.Add(state.Phase); statesOnOwnerThread &= Environment.CurrentManagedThreadId == blackThread; };
+    white.StateChanged += state => { phasesB.Add(state.Phase); statesOnOwnerThread &= Environment.CurrentManagedThreadId == blackThread; };
     // One broken subscriber must not suppress delivery to subsequent subscribers.
     white.MatchStarted += _ => throw new InvalidOperationException("intentional subscriber test");
     black.MatchStarted += match => { startedA = match.LocalBlack; sizeA = match.BoardSize; opponentA = match.Opponent; };
@@ -100,13 +124,36 @@ if (args.Contains("--live"))
     var room = "Liss-v3-check-" + DateTime.UtcNow.ToString("yyyyMMdd") + "-" + Guid.NewGuid().ToString("N")[..8];
     try
     {
-        black.Connect("Liss acceptance A"); white.Connect("Liss acceptance B");
-        PumpUntil(() => lobbyA && lobbyB, "two real Photon Asia connections", 65);
-        black.CreateRoom(room, 15);
-        PumpUntil(() => black.InRoom && roomsB.Any(r => r.Name == room && r.Players == 1 && r.Capacity == 2), "created own isolated room appears in lobby");
-        white.JoinRoom(room);
+        black.ConnectAndCreateRoom("Liss acceptance A", room + "-cancelled", 15);
+        Check("real automatic create exposes connecting intent immediately", black.Snapshot.Phase == LobbyPhase.Connecting
+            && black.Snapshot.PendingOperation == LobbyPendingOperation.CreateRoom && black.Snapshot.CanCancel);
+        black.CancelPendingOperation();
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.Disconnected, "real cancelled connect releases transport without entering room");
+        Check("real cancelled queue clears intent", !black.InRoom && black.Snapshot.PendingOperation == LobbyPendingOperation.None && black.Snapshot.CanConnect);
+        black.ConnectAndCreateRoom("Liss acceptance A", room + "-cancel2", 15);
+        white.Connect("Liss before nickname edit");
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.CreatingRoom, "real second automatic create reaches sent matchmaking request");
+        black.CancelPendingOperation();
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.Disconnected, "real sent matchmaking cancellation releases transport");
+        Check("real cancelled matching cannot enter room on a late response", !black.InRoom && black.Snapshot.PendingOperation == LobbyPendingOperation.None);
+        black.ConnectAndCreateRoom("Liss acceptance A", room, 15);
+        black.ConnectAndCreateRoom("Liss acceptance A", room, 15);
+        white.Connect("Liss before nickname edit"); white.Connect("Liss before nickname edit");
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.RoomWaiting && white.Snapshot.Phase == LobbyPhase.Lobby
+            && roomsB.Any(r => r.Name == room && r.Players == 1 && r.Capacity == 2), "automatic own isolated room appears in second client's lobby", 65);
+        Check("real waiting and lobby capabilities reflect actual connection", black.Snapshot.CanLeaveRoom && !black.Snapshot.CanCreateOrJoin
+            && white.Snapshot.CanCreateOrJoin && !white.Snapshot.CanConnect && phasesA.Contains(LobbyPhase.CreatingRoom));
+        Check("real cancelled intents leave no available lobby room", roomsB.All(r => r.Name != room + "-cancelled" && r.Name != room + "-cancel2"));
+        white.ConnectAndCreateRoom("Liss acceptance B", room, 15);
+        PumpUntil(() => white.Snapshot.Phase == LobbyPhase.Lobby && white.Status.Contains("创建房间失败"), "real duplicate room returns to usable lobby with failure visible");
+        Check("real create rejection clears pending intent", white.Snapshot.CanCreateOrJoin && white.Snapshot.PendingOperation == LobbyPendingOperation.None);
+        white.ConnectAndJoinRoom("Liss acceptance B", room + "-missing");
+        PumpUntil(() => white.Snapshot.Phase == LobbyPhase.Lobby && white.Status.Contains("加入房间失败"), "real missing own room returns to usable lobby with failure visible");
+        white.ConnectAndJoinRoom("Liss acceptance B", room);
         PumpUntil(() => startedA && startedB, "both peers start with opposite colors");
         Check("board and nickname agreement", sizeA == 15 && sizeB == 15 && opponentA == "Liss acceptance B" && opponentB == "Liss acceptance A");
+        Check("real match snapshots and state events agree on owner thread", black.Snapshot.Phase == LobbyPhase.Match
+            && white.Snapshot.Phase == LobbyPhase.Match && phasesB.Contains(LobbyPhase.JoiningRoom) && statesOnOwnerThread);
         var sessionBeforeRestart = Session(black);
         Raw(white, 51, new object[] { sessionBeforeRestart });
         Raw(white, 51, new object[] { sessionBeforeRestart, -1, 0, 1 });
@@ -156,25 +203,39 @@ if (args.Contains("--live"))
         PumpUntil(() => !white.InRoom && opponentLeft, "leave room notifies other peer");
         black.LeaveRoom();
         PumpUntil(() => !black.InRoom && roomsB.All(r => r.Name != room), "empty acceptance room removed");
-        PumpUntil(() => black.Status.Contains("大厅") && white.Status.Contains("大厅"), "both clients return to lobby");
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.Lobby && white.Snapshot.Phase == LobbyPhase.Lobby, "both clients return to structured lobby state");
+        white.Disconnect();
+        Check("real explicit disconnect blocks actions until transport stopped", white.Snapshot.Phase is LobbyPhase.Disconnecting or LobbyPhase.Disconnected);
+        PumpUntil(() => white.Snapshot.Phase == LobbyPhase.Disconnected, "real explicit disconnect completes");
         startedA = startedB = false;
         black.CreateRoom(room + "-19", 19);
-        PumpUntil(() => black.InRoom && roomsB.Any(r => r.Name == room + "-19"), "19-line room created after leaving");
-        white.JoinRoom(room + "-19");
+        PumpUntil(() => black.Snapshot.Phase == LobbyPhase.RoomWaiting, "19-line room created after leaving");
+        white.Connect("Liss pre-reconnect edit");
+        white.ConnectAndJoinRoom("Liss reconnected B", room + "-19");
+        white.ConnectAndJoinRoom("Liss reconnected B", room + "-19");
+        Check("real connecting join queues once with new nickname", white.Snapshot.Phase == LobbyPhase.Connecting
+            && white.Snapshot.PendingOperation == LobbyPendingOperation.JoinRoom && !white.Snapshot.CanCreateOrJoin);
         PumpUntil(() => startedA && startedB && sizeA == 19 && sizeB == 19, "19-line match and rejoin handshake agreed");
+        Check("real reconnect is fresh match and connecting nickname edit reaches opponent", opponentA == "Liss reconnected B"
+            && black.Snapshot.Phase == LobbyPhase.Match && white.Snapshot.Phase == LobbyPhase.Match && statesOnOwnerThread);
     }
     finally
     {
-        if (black.InRoom) black.LeaveRoom();
-        if (white.InRoom) white.LeaveRoom();
-        for (var i = 0; i < 30; i++) { black.Service(); white.Service(); Thread.Sleep(10); }
+        black.Disconnect(); white.Disconnect();
+        var cleanup = Stopwatch.StartNew();
+        while ((black.Snapshot.Phase != LobbyPhase.Disconnected || white.Snapshot.Phase != LobbyPhase.Disconnected) && cleanup.Elapsed.TotalSeconds < 5)
+        { black.Service(); white.Service(); Thread.Sleep(10); }
+        liveDetails = new { room, cancelledRooms = new[] { room + "-cancelled", room + "-cancel2" },
+            phasesA = phasesA.Select(phase => phase.ToString()).ToArray(), phasesB = phasesB.Select(phase => phase.ToString()).ToArray(),
+            statesOnOwnerThread, finalA = black.Snapshot.Phase.ToString(), finalB = white.Snapshot.Phase.ToString() };
+        Check("real acceptance clients explicitly disconnect and release their room", black.Snapshot.Phase == LobbyPhase.Disconnected && white.Snapshot.Phase == LobbyPhase.Disconnected);
     }
 }
 if (args.FirstOrDefault(a => a.StartsWith("--report=")) is string reportArg)
 {
     var path = Path.GetFullPath(reportArg[9..]);
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    File.WriteAllText(path, JsonSerializer.Serialize(new { atUtc = DateTimeOffset.UtcNow, runtime = Environment.Version.ToString(), live = args.Contains("--live"), checks }, new JsonSerializerOptions { WriteIndented = true }));
+    File.WriteAllText(path, JsonSerializer.Serialize(new { atUtc = DateTimeOffset.UtcNow, runtime = Environment.Version.ToString(), live = args.Contains("--live"), liveDetails, checks }, new JsonSerializerOptions { WriteIndented = true }));
 }
 if (checks.Any(check => !(bool)check.GetType().GetProperty("passed")!.GetValue(check)!))
     throw new Exception("An asynchronous callback acceptance check failed.");

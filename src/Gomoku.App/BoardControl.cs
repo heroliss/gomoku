@@ -9,6 +9,15 @@ internal sealed class BoardControl : Control
     private GameBoard board = new();
     private Move? hover;
     private Move keyboard = new(7, 7);
+    private string? interactionNotice;
+    private string[] noticeLines = [];
+    private readonly Font noticeTitleFont = new("Microsoft YaHei UI", 11, FontStyle.Bold);
+    private readonly Font noticeDetailFont = new("Microsoft YaHei UI", 9.5f);
+    private readonly StringFormat noticeFormat = new()
+    {
+        Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center,
+        FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter
+    };
     internal event Action<int, int>? PlayRequested;
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     internal bool ShowNumbers { get; set; }
@@ -16,6 +25,19 @@ internal sealed class BoardControl : Control
     internal bool InputEnabled { get; set; } = true;
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     internal Move? HintMove { get; set; }
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal string? InteractionNotice
+    {
+        get => interactionNotice;
+        set
+        {
+            if (string.Equals(interactionNotice, value, StringComparison.Ordinal)) return;
+            interactionNotice = value;
+            noticeLines = string.IsNullOrWhiteSpace(value) ? [] : value.Replace("\r\n", "\n").Replace('\r', '\n')
+                .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Take(2).ToArray();
+            Invalidate();
+        }
+    }
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     internal GameBoard Board
     {
@@ -120,6 +142,57 @@ internal sealed class BoardControl : Control
             var focus = Rectangle.Round(surface); focus.Inflate(6, 6);
             ControlPaint.DrawFocusRectangle(g, focus, Theme.Muted, Theme.Background);
         }
+        if (noticeLines.Length > 0) DrawInteractionNotice(g, surface);
+    }
+
+    private void DrawInteractionNotice(Graphics g, RectangleF surface)
+    {
+        float scale = DeviceDpi / 96f;
+        float inset = Math.Min(22 * scale, surface.Width * .05f);
+        float width = Math.Min(500 * scale, surface.Width - inset * 2);
+        float height = (noticeLines.Length > 1 ? 88 : 60) * scale;
+        var panel = new RectangleF(surface.Left + (surface.Width - width) / 2,
+            surface.Top + (surface.Height - height) / 2, width, height);
+        using var veil = new SolidBrush(Color.FromArgb(48, Theme.Background));
+        g.FillRectangle(veil, surface);
+        using var shape = NoticeShape(panel, 10 * scale);
+        using var background = new SolidBrush(Color.FromArgb(246, Theme.Panel));
+        using var outline = new Pen(Theme.Line, scale);
+        using var title = new SolidBrush(Theme.Text);
+        using var detail = new SolidBrush(Theme.Muted);
+        g.FillPath(background, shape);
+        g.DrawPath(outline, shape);
+        float textInset = 18 * scale;
+        var titleBounds = new RectangleF(panel.Left + textInset,
+            noticeLines.Length > 1 ? panel.Top + 13 * scale : panel.Top,
+            panel.Width - textInset * 2, noticeLines.Length > 1 ? 28 * scale : panel.Height);
+        g.DrawString(noticeLines[0], noticeTitleFont, title, titleBounds, noticeFormat);
+        if (noticeLines.Length > 1)
+            g.DrawString(noticeLines[1], noticeDetailFont, detail,
+                new RectangleF(panel.Left + textInset, panel.Top + 43 * scale, panel.Width - textInset * 2, 28 * scale), noticeFormat);
+    }
+
+    private static GraphicsPath NoticeShape(RectangleF rectangle, float radius)
+    {
+        float diameter = radius * 2;
+        var shape = new GraphicsPath();
+        shape.AddArc(rectangle.Left, rectangle.Top, diameter, diameter, 180, 90);
+        shape.AddArc(rectangle.Right - diameter, rectangle.Top, diameter, diameter, 270, 90);
+        shape.AddArc(rectangle.Right - diameter, rectangle.Bottom - diameter, diameter, diameter, 0, 90);
+        shape.AddArc(rectangle.Left, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
+        shape.CloseFigure();
+        return shape;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            noticeTitleFont.Dispose();
+            noticeDetailFont.Dispose();
+            noticeFormat.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     private static void DrawStone(Graphics g, float x, float y, float diameter, bool black, int alpha)

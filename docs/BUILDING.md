@@ -41,15 +41,21 @@ Core、Analysis、Storage 和 Preferences 控制台测试不需要 Photon SDK �
 ## Windows 完整包
 
 ```powershell
-.\scripts\publish.ps1 -Version 3.1.0
+.\scripts\publish.ps1 -Version 3.2.0
 ```
 
-默认版本为 **3.1.0**。顺序：验证 SDK → 运行五个控制台测试项目 → `dotnet publish` 自包含 Windows x64 → 检查 EXE/运行时/Photon 文件 → 复制 README、文档和第三方声明 → 生成逐文件校验清单 → 生成 ZIP 与 SHA-256。
+默认版本为 **3.2.0**。顺序：验证 SDK → 运行五个控制台测试项目 → `dotnet publish` 自包含 Windows x64 → 检查 EXE/运行时/Photon 文件 → 复制 README、文档和第三方声明 → 生成逐文件校验清单 → 生成 ZIP 与 SHA-256。
 
 五组测试为 `Gomoku.Core.Tests`、`Gomoku.Analysis.Tests`、`Gomoku.Storage.Tests`、`Gomoku.Preferences.Tests`、`Gomoku.Networking.Tests`。Analysis 覆盖双方配置和棋谱前缀统计，Preferences 覆盖独立设置的持久化与异常输入。Core、Analysis、Storage 接收首个报告路径参数；Networking、Preferences 使用 `--report=<路径>`。
 
-- 解压构建：`artifacts/publish/<构建标识>/liss-gomoku-v3.1.0-win-x64/`
-- 下载文件：`artifacts/releases/liss-gomoku-v3.1.0-win-x64.zip`
+Networking 的离线检查还覆盖联机流程的连接排队、取消、超时、失败重试和迟到回调。真实双客户端验收需另加 `--live`；普通打包不自动进行实网验收：
+
+```powershell
+dotnet run --project tests/Gomoku.Networking.Tests -c Release -- --live
+```
+
+- 解压构建：`artifacts/publish/<构建标识>/liss-gomoku-v3.2.0-win-x64/`
+- 下载文件：`artifacts/releases/liss-gomoku-v3.2.0-win-x64.zip`
 - 校验文件：同名 `.zip.sha256`
 - 测试与包记录：`artifacts/verification/<构建标识>/`
 
@@ -61,6 +67,8 @@ Core、Analysis、Storage 和 Preferences 控制台测试不需要 Photon SDK �
 
 1. 在全新数据目录启动实际 EXE，测试新局、提示/取消、悔棋/回看、保存/读取，以及思考中重开/关闭；黑白各选不同引擎、深度、预算与评估，重启后确认分别恢复。
 2. 在“统计”页检查实际 AI 落子的双方分账。提示、作废搜索、人工/联机落子不计；回看、悔棋/重做跟随当前棋谱前缀，新局/读档清空测量。搜索在后台工作线程运行，内部单线程，不以界面响应或墙钟耗时推断 CPU 利用率。
-3. 如发布联机功能，用两份实际客户端确认连接、建房、加入、双向落子、请求/响应和离房；控制台协议测试不能代替实网。
+3. 用两份实际客户端确认首次选页自动连接、未连接时建房/加入、取消/主动断开、失败重试、等待/退房时禁用冲突操作，以及双向落子、请求/响应和返回大厅。确认断开不自动无限重连，棋谱保留；控制台离线测试不能代替实网和实际 GUI。
 4. 将完整 ZIP 与 SHA-256 作为同一版本上传；不要上传 `legacy/`、`vendor/`、错误日志、自动存档、测试用户数据或私有配置。
-5. 完整游戏保留 `licenses/PHOTON-NOTICE.md`、`Photon-NET-OSS-current.pdf`，以及 .NET Runtime/WinForms 的三份许可/第三方声明。公开源码不附单独 SDK DLL，也没有额外添加仓库 LICENSE。ZIP 内根目录稳定为 `liss-gomoku-v3.1.0-win-x64/`，不包含构建随机标识。
+5. 完整游戏保留 `licenses/PHOTON-NOTICE.md`、`Photon-NET-OSS-current.pdf`，以及 .NET Runtime/WinForms 的三份许可/第三方声明。公开源码不附单独 SDK DLL，也没有额外添加仓库 LICENSE。ZIP 内根目录稳定为 `liss-gomoku-v3.2.0-win-x64/`，不包含构建随机标识。
+
+3.2 沿用 `PhotonLobbyService.Protocol = "liss-gomoku-v3"`，与 3.0/3.1 共用房间协议；发布版本号不用于隔离大厅。断线后的新连接不会恢复原棋局。

@@ -30,6 +30,16 @@ internal static class Theme
         };
         button.FlatAppearance.BorderColor = primary ? Accent : Line;
         button.FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(150, 235, 219) : Color.FromArgb(36, 53, 72);
+        // Flat WinForms buttons otherwise draw nearly black disabled captions on our dark panel.
+        button.Paint += (_, e) =>
+        {
+            if (button.Enabled) return;
+            using var surface = new SolidBrush(Panel);
+            e.Graphics.FillRectangle(surface, new Rectangle(1, 1, Math.Max(0, button.Width - 2), Math.Max(0, button.Height - 2)));
+            TextRenderer.DrawText(e.Graphics, button.Text, button.Font, button.ClientRectangle, Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
+                | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        };
         if (action is not null) button.Click += action;
         return button;
     }
