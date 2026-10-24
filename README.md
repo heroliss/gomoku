@@ -1,8 +1,8 @@
-# Liss Gomoku · 五子棋 V3
+# Liss Gomoku · 五子棋 V3.1
 
-一个保留早期搜索算法、重新整理交互与工程实现的 Windows 五子棋程序。支持人机、本地双人、引擎自对弈、Photon 在线双人，以及棋谱保存和回看。
+一个保留早期搜索算法、重新整理交互与工程实现的 Windows 五子棋程序。支持人机、本地双人、引擎自对弈、Photon 在线双人，以及棋谱保存和回看。3.1 新增双方独立搜索设置与思考统计。
 
-[作品介绍](https://heroliss.github.io/liss-works/projects/gomoku/) · [下载最新 Windows 版本](https://github.com/heroliss/gomoku/releases/latest)
+[作品介绍](https://heroliss.github.io/liss-works/projects/gomoku/) · [下载最新 Windows 版本](https://github.com/heroliss/gomoku/releases/latest) · [更新记录](docs/CHANGELOG.md)
 
 ![真实运行中的 Liss Gomoku V3：木纹棋盘、落子历史与对局设置](docs/preview.webp)
 
@@ -36,6 +36,14 @@ V3 根据找回的 **v2.3 工程源码**重新开发；旧备份中虽然还有 
 | 五元组单层 | 将五格窗口的攻防价值累加到候选落点；不使用搜索深度或外部估值选项 |
 
 可选择棋型或五元组估值。深度显示的是**完整完成的搜索层数**，时间用完保留最近完整结果。新引擎是裁剪候选的选择性搜索，不是完全求解器，不保证所有战术或某个棋力等级。
+
+## 双方设置与思考统计
+
+在“引擎”页分别设置黑方、白方的引擎、深度 **1–8**、每步预算 **250–10,000 ms** 和评估函数；修改一方不影响另一方。单层五元组不使用深度和外部评估选项，但保留所选值供切回其他引擎使用。设置独立于棋谱保存在 `engine-preferences.json`，下次启动恢复。
+
+“统计”页按黑白分别显示最近、累计和平均耗时、决策次数、累计节点与命中，以及最近完成深度。只统计**当前棋谱位置之前、已实际落子的 AI 决策**：提示、取消、人工和联机落子不计；回看、悔棋与重做跟随当前前缀汇总，新局或读档重置测量。统计不写入棋谱。
+
+搜索通过 `Task.Run` 在后台工作线程执行，内部搜索仍为单线程。耗时是墙钟时间，不是 CPU 利用率，不据此声称并行搜索或硬件性能收益。
 
 ## 操作与棋谱
 
@@ -72,7 +80,9 @@ dotnet build src/Gomoku.App/Gomoku.App.csproj -c Release -p:PhotonSdkDirectory='
 
 ```powershell
 dotnet run --project tests/Gomoku.Core.Tests -c Release
+dotnet run --project tests/Gomoku.Analysis.Tests -c Release
 dotnet run --project tests/Gomoku.Storage.Tests -c Release
+dotnet run --project tests/Gomoku.Preferences.Tests -c Release
 dotnet run --project tests/Gomoku.Networking.Tests -c Release
 ```
 
@@ -81,9 +91,14 @@ dotnet run --project tests/Gomoku.Networking.Tests -c Release
 ```powershell
 .\Liss.Gomoku.exe --showcase --hint --page engines
 .\Liss.Gomoku.exe --showcase --engine legacy-negamax --depth 8 --budget 10000 --autoplay --page engines
+
+# 空棋盘开始，双方使用独立设置，真实自对弈 12 手后暂停并查看统计
+.\Liss.Gomoku.exe --showcase --empty-showcase --autoplay --autoplay-plies 12 --page stats --black-engine threat-search --black-depth 3 --black-budget 1000 --black-evaluation patterns --white-engine legacy-alpha-beta --white-depth 2 --white-budget 750 --white-evaluation quintuple
 ```
 
-Core 和 Storage 测试无需 Photon；Networking 测试需要兼容 SDK，其中真实双客户端联机验收须另行执行。测试报告与打包输出放在忽略的 `artifacts/` 中；打包不等于实际 GUI/网络验收。
+`--black-*` / `--white-*` 分别覆盖该方的 `engine`、`depth`、`budget`、`evaluation`；仍支持同时设置两方的 `--engine`、`--depth`、`--budget`、`--evaluation`，同一字段以单方参数优先。评估值为 `patterns` 或 `quintuple`。`--page stats` 打开统计页；`--empty-showcase` 配合 `--showcase` 使用空棋盘，`--autoplay-plies N` 限制本次继续自动落子的手数。
+
+Core、Analysis、Storage、Preferences 测试无需 Photon 或 Windows UI；Networking 测试需要兼容 SDK，其中真实双客户端联机验收须另行执行。测试报告与打包输出放在忽略的 `artifacts/` 中；打包不等于实际 GUI/网络验收。
 
 Photon 为 Exit Games 的专有依赖；完整游戏分发随附 Photon 与 .NET Runtime/WinForms 的许可及第三方声明，不提供独立 SDK 镜像。这些依赖声明不为本仓库额外授予开源许可。
 

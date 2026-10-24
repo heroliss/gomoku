@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '3.0.0',
+    [string]$Version = '3.1.0',
     [string]$PhotonSdkDirectory,
     [switch]$SkipTests
 )
@@ -32,10 +32,10 @@ try {
     New-Item -ItemType Directory -Path $publishDirectory, $releaseDirectory, $reportDirectory -Force | Out-Null
 
     if (-not $SkipTests) {
-        foreach ($project in @('Gomoku.Core.Tests', 'Gomoku.Storage.Tests', 'Gomoku.Networking.Tests')) {
+        foreach ($project in @('Gomoku.Core.Tests', 'Gomoku.Analysis.Tests', 'Gomoku.Storage.Tests', 'Gomoku.Preferences.Tests', 'Gomoku.Networking.Tests')) {
             $result = Join-Path $reportDirectory "$project.json"
             # PowerShell unwraps a one-item pipeline; retain string[] so native splatting cannot split a path into characters.
-            [string[]]$testArguments = @(if ($project -eq 'Gomoku.Networking.Tests') { "--report=$result" } else { $result })
+            [string[]]$testArguments = @(if ($project -in @('Gomoku.Networking.Tests', 'Gomoku.Preferences.Tests')) { "--report=$result" } else { $result })
             & dotnet run --project "tests/$project" -c Release @sdkProperties -- @testArguments
             if ($LASTEXITCODE -ne 0) { throw "Acceptance failed: $project" }
         }
@@ -54,7 +54,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $publishDirectory 'README.md')
     $docsOutput = Join-Path $publishDirectory 'docs'
     New-Item -ItemType Directory -Path $docsOutput -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/BUILDING.md') -Destination (Join-Path $docsOutput 'BUILDING.md')
+    foreach ($document in @('BUILDING.md', 'CHANGELOG.md', 'preview.webp')) {
+        Copy-Item -LiteralPath (Join-Path $projectRoot "docs/$document") -Destination (Join-Path $docsOutput $document)
+    }
     $licenseOutput = Join-Path $publishDirectory 'licenses'
     New-Item -ItemType Directory -Path $licenseOutput -Force | Out-Null
     foreach ($notice in @('PHOTON-NOTICE.md', 'Photon-NET-OSS-current.pdf', 'dotnet-runtime-LICENSE.txt', 'dotnet-runtime-THIRD-PARTY-NOTICES.txt', 'dotnet-winforms-LICENSE.txt')) {

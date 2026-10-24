@@ -7,6 +7,7 @@ namespace Liss.Gomoku.App;
 internal sealed class MainForm : Form
 {
     private GameBoard _game = new();
+    private MatchAnalysis _analysis = new();
     private readonly BoardControl _board = new() { Dock = DockStyle.Fill, Margin = Padding.Empty };
     private readonly Label _turn = Theme.Label("黑方先行", 18, true);
     private readonly Label _position = Theme.Label("自由规则 · 连成五子或以上获胜");
@@ -15,17 +16,19 @@ internal sealed class MainForm : Form
     private readonly Label _engineDescription = Theme.Label("");
     private readonly Label _connection = Theme.Label("尚未连接");
     private readonly ComboBox _mode = Theme.Combo(), _size = Theme.Combo();
-    private readonly ComboBox _blackEngine = Theme.Combo(), _whiteEngine = Theme.Combo(), _evaluation = Theme.Combo();
-    private readonly NumericUpDown _depth = Theme.Number(1, 8, 4), _budget = Theme.Number(250, 10000, 1500, 250);
+    private readonly EngineSettingsControl _blackSettings = new("黑方"), _whiteSettings = new("白方");
+    private readonly SearchStatisticsControl _statistics = new();
+    private readonly Button[] _sideTabs = new Button[2];
     private readonly ListBox _history = new(), _rooms = new();
     private readonly TextBox _nickname = Theme.Input("Liss"), _roomName = Theme.Input("Liss 的棋室");
-    private readonly Panel[] _pages = [new(), new(), new()];
-    private readonly Button[] _tabs = new Button[3];
+    private readonly Panel[] _pages = [new(), new(), new(), new()];
+    private readonly Button[] _tabs = new Button[4];
     private readonly Button _newGame, _undo, _hint, _pause, _leave;
     private readonly PhotonLobbyService _network = new();
     private readonly System.Windows.Forms.Timer _networkTimer = new() { Interval = 30 };
     private CancellationTokenSource? _search;
     private int _generation;
+    private int? _autoplayStopAt;
     private bool _thinking, _paused, _closing, _online, _reviewing, _updatingHistory, _initializing = true;
     private readonly bool _showcase;
     private readonly ToolTip _tips = new() { AutoPopDelay = 12000, InitialDelay = 350 };
@@ -33,7 +36,7 @@ internal sealed class MainForm : Form
     internal MainForm(bool showcase, string[]? startupArgs = null)
     {
         _showcase = showcase;
-        Text = "Liss Gomoku · 五子棋 v3";
+        Text = "Liss Gomoku · 五子棋 v3.1";
         ClientSize = new Size(1280, 840);
         MinimumSize = new Size(1060, 790);
         StartPosition = FormStartPosition.CenterScreen;
@@ -51,14 +54,19 @@ internal sealed class MainForm : Form
         _networkTimer.Tick += (_, _) => { _network.Service(); UpdateInteraction(); };
         _networkTimer.Start();
         _mode.SelectedIndexChanged += (_, _) => { if (!_initializing) { CancelSearch(); _paused = true; _reviewing = false; RefreshGame("模式已更改，点击继续或落子"); } };
-        _blackEngine.SelectedIndexChanged += (_, _) => ShowEngineDescription();
-        _whiteEngine.SelectedIndexChanged += (_, _) => ShowEngineDescription();
+        _blackSettings.ProfileChanged += ProfileChanged;
+        _whiteSettings.ProfileChanged += ProfileChanged;
         _history.SelectedIndexChanged += (_, _) => { if (!_updatingHistory && _history.SelectedIndex >= 0) ReviewTo(_history.SelectedIndex + 1); };
         _rooms.DoubleClick += (_, _) => JoinSelectedRoom();
-        _initializing = false;
-        ShowEngineDescription();
+        if (!showcase)
+        {
+            var preferences = EnginePreferencesStore.Load(PreferencesPath);
+            _blackSettings.Profile = preferences.Black;
+            _whiteSettings.Profile = preferences.White;
+        }
         if (showcase) LoadShowcase(); else RestoreGame();
         ApplyStartupOptions(startupArgs ?? []);
+        _initializing = false;
         RefreshGame(showcase ? "真实中盘局面 · 可自由继续落子与试用引擎" : "准备就绪 · 点击棋盘落子");
         Shown += async (_, _) => { if ((startupArgs ?? []).Contains("--hint")) await Think(true); else ScheduleComputer(); };
     }
@@ -74,7 +82,7 @@ internal sealed class MainForm : Form
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 570));
         header.RowStyles.Add(new RowStyle(SizeType.Absolute, 45)); header.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
         header.Controls.Add(Theme.Label("GOMOKU", 25, true), 0, 0);
-        header.Controls.Add(Theme.Label("LISS  /  五子棋与搜索实验  /  v3.0", 9), 0, 1);
+        header.Controls.Add(Theme.Label("LISS  /  五子棋与搜索实验  /  v3.1", 9), 0, 1);
         var open = Theme.Button("打开", (_, _) => OpenGame());
         var save = Theme.Button("保存", (_, _) => SaveGame());
         var actions = Theme.Buttons(_newGame, _undo, _hint, _pause, open, save);
@@ -90,11 +98,11 @@ internal sealed class MainForm : Form
         var current = Theme.Stack(); current.Padding = new Padding(18, 10, 18, 6);
         Theme.AddRow(current, _turn, 42); Theme.AddRow(current, _position, 34);
         side.Controls.Add(current, 0, 0);
-        var nav = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Padding = new Padding(14, 0, 10, 4), Margin = Padding.Empty };
-        for (int i = 0; i < 3; i++)
+        var nav = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Padding = new Padding(14, 0, 10, 4), Margin = Padding.Empty };
+        for (int i = 0; i < _tabs.Length; i++)
         {
-            int index = i; nav.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
-            _tabs[i] = Theme.Button(new[] { "对局", "引擎", "联机" }[i], (_, _) => SelectPage(index));
+            int index = i; nav.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            _tabs[i] = Theme.Button(new[] { "对局", "引擎", "统计", "联机" }[i], (_, _) => SelectPage(index));
             _tabs[i].Dock = DockStyle.Fill; nav.Controls.Add(_tabs[i], i, 0);
         }
         side.Controls.Add(nav, 0, 1);
@@ -104,7 +112,7 @@ internal sealed class MainForm : Form
         body.Controls.Add(side, 1, 0); root.Controls.Add(body, 0, 1);
         _footer.Font = new Font("Microsoft YaHei UI", 9);
         root.Controls.Add(_footer, 0, 2);
-        BuildGamePage(); BuildEnginePage(); BuildNetworkPage(); SelectPage(0);
+        BuildGamePage(); BuildEnginePage(); BuildStatisticsPage(); BuildNetworkPage(); SelectPage(0);
         _tips.SetToolTip(_undo, "Ctrl+Z · 人机对局退回到你的上一回合；联机需对方同意。");
         _tips.SetToolTip(_hint, "由当前行棋方的引擎计算建议，不自动落子。");
     }
@@ -133,30 +141,49 @@ internal sealed class MainForm : Form
     private void BuildEnginePage()
     {
         var stack = Theme.Stack(); _pages[1].Controls.Add(stack);
-        foreach (var combo in new[] { _blackEngine, _whiteEngine })
+        var sides = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        for (int i = 0; i < 2; i++)
         {
-            combo.DisplayMember = nameof(EngineDescriptor.Name); combo.ValueMember = nameof(EngineDescriptor.Id);
-            foreach (var engine in EngineCatalog.All) combo.Items.Add(engine);
-            combo.SelectedIndex = 0;
+            int index = i; sides.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            _sideTabs[i] = Theme.Button(i == 0 ? "黑方设置" : "白方设置", (_, _) => SelectEngineSide(index));
+            _sideTabs[i].Dock = DockStyle.Fill; sides.Controls.Add(_sideTabs[i], i, 0);
         }
-        AddField(stack, "黑方引擎", _blackEngine); AddField(stack, "白方引擎", _whiteEngine);
-        _evaluation.Items.AddRange(["棋型评估", "五元组评估"]); _evaluation.SelectedIndex = 0;
-        AddField(stack, "旧引擎评估函数", _evaluation);
-        var parameters = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
-        parameters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45)); parameters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-        parameters.Controls.Add(Theme.Label("最大深度"), 0, 0); parameters.Controls.Add(Theme.Label("时间预算 / ms"), 1, 0);
-        parameters.Controls.Add(_depth, 0, 1); parameters.Controls.Add(_budget, 1, 1);
-        Theme.AddRow(stack, parameters, 64);
-        Theme.AddRow(stack, _engineDescription, 60);
-        Theme.AddRow(stack, Theme.Label("最近一次搜索", 10, true), 34);
+        Theme.AddRow(stack, sides, 42);
+        var editor = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        foreach (var settings in new[] { _blackSettings, _whiteSettings }) { settings.Dock = DockStyle.Fill; editor.Controls.Add(settings); }
+        Theme.AddRow(stack, editor, 266); SelectEngineSide(0);
+        Theme.AddRow(stack, Theme.Label("双方独立配置", 10, true), 34);
+        Theme.AddRow(stack, Theme.Label("引擎、深度、每步预算与评估函数分别保存。\n思考中修改参数，将在下一次搜索生效。\n人机对局的提示使用当前行棋方设置。", 9), 76);
+        Theme.AddRow(stack, Theme.Label("后台线程计算，界面可继续响应。\n单次搜索为单线程；可随时暂停或取消。\n实测耗时、节点与缓存命中见「统计」。", 8.5f), 72);
+    }
+
+    private void SelectEngineSide(int index)
+    {
+        _blackSettings.Visible = index == 0; _whiteSettings.Visible = index == 1;
+        for (int i = 0; i < _sideTabs.Length; i++)
+        {
+            _sideTabs[i].BackColor = i == index ? Theme.Accent : Theme.Panel;
+            _sideTabs[i].ForeColor = i == index ? Theme.Background : Theme.Text;
+            _sideTabs[i].FlatAppearance.MouseOverBackColor = i == index ? Color.FromArgb(150, 235, 219) : Color.FromArgb(36, 53, 72);
+            _sideTabs[i].FlatAppearance.MouseDownBackColor = _sideTabs[i].FlatAppearance.MouseOverBackColor;
+        }
+    }
+
+    private void BuildStatisticsPage()
+    {
+        var stack = Theme.Stack(); _pages[2].Controls.Add(stack);
+        Theme.AddRow(stack, Theme.Label("AI 思考统计", 12, true), 34);
+        Theme.AddRow(stack, _engineDescription, 52);
+        _statistics.Dock = DockStyle.Fill; Theme.AddRow(stack, _statistics, 196);
+        Theme.AddRow(stack, Theme.Label("仅计本局当前棋谱中已落子的 AI 决策。\n提示、取消、手动与联机落子不计入。\n回看随手数更新；新局或读档后重新统计。", 8.5f), 70);
+        Theme.AddRow(stack, Theme.Label("最近一次搜索", 10, true), 30);
         _diagnostics.ForeColor = Theme.Accent; _diagnostics.Font = new Font("Microsoft YaHei UI", 10);
-        Theme.AddRow(stack, _diagnostics, 90);
-        Theme.AddRow(stack, Theme.Label("11 种可选引擎 · 独立限时与取消\n深度为完整完成的层数；单层五元组不使用深度。\n时间预算会受机器、局面和候选点数量影响。", 8.5f), 66);
+        Theme.AddRow(stack, _diagnostics, 100);
     }
 
     private void BuildNetworkPage()
     {
-        var stack = Theme.Stack(); _pages[2].Controls.Add(stack);
+        var stack = Theme.Stack(); _pages[3].Controls.Add(stack);
         AddField(stack, "昵称", _nickname);
         var connect = Theme.Button("连接大厅", (_, _) => NetworkAction(() => _network.Connect(_nickname.Text)), true); connect.Width = 130;
         _leave.Width = 130;
@@ -180,12 +207,29 @@ internal sealed class MainForm : Form
     { Theme.AddRow(stack, Theme.Label(title), 28); Theme.AddRow(stack, field, 37); }
     private void SelectPage(int index)
     {
-        for (int i = 0; i < 3; i++) { _pages[i].Visible = i == index; _tabs[i].BackColor = i == index ? Theme.Accent : Theme.Panel; _tabs[i].ForeColor = i == index ? Theme.Background : Theme.Text; }
+        for (int i = 0; i < _pages.Length; i++)
+        {
+            _pages[i].Visible = i == index;
+            _tabs[i].BackColor = i == index ? Theme.Accent : Theme.Panel;
+            _tabs[i].ForeColor = i == index ? Theme.Background : Theme.Text;
+            _tabs[i].FlatAppearance.MouseOverBackColor = i == index ? Color.FromArgb(150, 235, 219) : Color.FromArgb(36, 53, 72);
+            _tabs[i].FlatAppearance.MouseDownBackColor = _tabs[i].FlatAppearance.MouseOverBackColor;
+        }
     }
     private void ShowEngineDescription()
     {
-        if (_blackEngine.SelectedItem is EngineDescriptor black && _whiteEngine.SelectedItem is EngineDescriptor white)
-            _engineDescription.Text = (_game.BlackToMove ? black : white).Description;
+        static string Describe(string side, SearchProfile profile) =>
+            $"{side} · 深度上限 {profile.Depth} 层 · 预算 {profile.TimeBudgetMs:N0} ms";
+        _engineDescription.Text = Describe("黑", _blackSettings.Profile) + "\n" + Describe("白", _whiteSettings.Profile);
+    }
+
+    private static string PreferencesPath => Path.Combine(SessionFiles.DataDirectory, "engine-preferences.json");
+    private void ProfileChanged(object? sender, EventArgs e) { ShowEngineDescription(); PersistPreferences(); }
+    private void PersistPreferences()
+    {
+        if (_showcase || _initializing) return;
+        try { EnginePreferencesStore.Save(PreferencesPath, new(_blackSettings.Profile, _whiteSettings.Profile)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { SessionFiles.Log(e); _footer.Text = "引擎设置保存失败，当前设置仍可使用"; }
     }
 
     private bool HumanTurn => _online ? _network.IsLocalBlack == _game.BlackToMove : _mode.SelectedIndex switch
@@ -195,6 +239,8 @@ internal sealed class MainForm : Form
     {
         if (_closing || _thinking || _game.IsFinished || !HumanTurn || (_online && _network.HasPendingRequest)) return;
         if (!_game.TryPlay(x, y)) return;
+        // Replaying a former AI coordinate by hand is a new human decision, not a Redo.
+        _analysis.DiscardFrom(_game.Cursor);
         _reviewing = false; _paused = false; _board.HintMove = null;
         if (_online && !_network.SendMove(x, y, _game.Cursor))
         {
@@ -213,20 +259,27 @@ internal sealed class MainForm : Form
         CancelSearch();
         int generation = _generation; int cursor = _game.Cursor;
         var snapshot = _game.Clone();
-        var engine = (EngineDescriptor)(_game.BlackToMove ? _blackEngine.SelectedItem! : _whiteEngine.SelectedItem!);
-        var options = new SearchOptions(engine.Id, (int)_depth.Value, (int)_budget.Value, _evaluation.SelectedIndex == 1 ? "quintuple" : "patterns");
+        bool black = _game.BlackToMove;
+        var options = (black ? _blackSettings.Profile : _whiteSettings.Profile).ToOptions();
+        var engine = EngineCatalog.All.First(e => e.Id == options.EngineId);
         var cts = new CancellationTokenSource(); _search = cts; _thinking = true;
         RefreshGame((hintOnly ? "正在计算提示 · " : "正在思考 · ") + engine.Name);
         try
         {
             var result = await Task.Run(() => EngineCatalog.Search(snapshot, options, cts.Token));
             if (_closing || generation != _generation || cts.IsCancellationRequested || _game.Cursor != cursor) return;
-            _diagnostics.Text = $"{engine.Name}\n深度 {result.Depth}    /    {result.ElapsedMs:N0} ms\n节点 {result.Nodes:N0}    /    命中 {result.TableHits:N0}\n{result.Detail}";
+            _diagnostics.Text = $"{(black ? "黑方" : "白方")}{(hintOnly ? "提示" : "落子")} · {engine.Name}\n深度 {result.Depth}    /    {result.ElapsedMs:N0} ms\n节点 {result.Nodes:N0}    /    命中 {result.TableHits:N0}\n{result.Detail}";
             _thinking = false;
             if (result.Move is { } move && (uint)move.X < _game.Size && (uint)move.Y < _game.Size && _game.Cells[move.X, move.Y] == Stone.空)
             {
                 if (hintOnly) { _board.HintMove = move; _paused = true; RefreshGame($"建议落点 {(char)('A' + move.X)}{move.Y + 1} · {engine.Name}"); }
-                else if (_game.TryPlay(move.X, move.Y)) { _board.HintMove = null; RefreshGame(); Persist(); }
+                else if (_game.TryPlay(move.X, move.Y))
+                {
+                    _analysis.Record(_game, result, options.EngineId);
+                    _board.HintMove = null;
+                    if (_autoplayStopAt is int stopAt && _game.Cursor >= stopAt) _paused = true;
+                    RefreshGame(); Persist();
+                }
             }
             else { _paused = true; RefreshGame("引擎未返回有效落点，请切换引擎或继续手动对局"); }
         }
@@ -250,7 +303,8 @@ internal sealed class MainForm : Form
     {
         if (_online) { NetworkAction(_network.RequestRestart); return; }
         if (_network.InRoom) { RefreshGame("请先离开房间再开始本地对局"); return; }
-        CancelSearch(); _game = new GameBoard(_size.SelectedIndex == 1 ? 19 : 15);
+        CancelSearch(); _game = new GameBoard(_size.SelectedIndex == 1 ? 19 : 15); _analysis = new();
+        _autoplayStopAt = null;
         _board.Board = _game; _paused = false; _reviewing = false;
         _diagnostics.Text = "尚未搜索\n选择引擎，开始一局或请求提示。";
         RefreshGame(); Persist(); ScheduleComputer();
@@ -275,6 +329,8 @@ internal sealed class MainForm : Form
 
     private void RefreshGame(string? message = null)
     {
+        _analysis.Reconcile(_game);
+        _statistics.SetSummaries(_analysis.GetSummary(_game, true), _analysis.GetSummary(_game, false));
         _board.Board = _game;
         _turn.Text = _game.IsDraw ? "和棋" : _game.Winner != Stone.空 ? (_game.Winner == Stone.黑子 ? "黑方获胜" : "白方获胜") : (_game.BlackToMove ? "黑方行棋" : "白方行棋");
         _turn.ForeColor = _game.IsFinished ? Theme.Accent : Theme.Text;
@@ -304,8 +360,8 @@ internal sealed class MainForm : Form
         if (_network.InRoom) { RefreshGame("请先离开房间再打开棋谱"); return; }
         using var dialog = new OpenFileDialog { Title = "打开五子棋棋谱", Filter = "五子棋棋谱 (*.json;*.sgf)|*.json;*.sgf", CheckFileExists = true };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { var saved = SessionFiles.Load(dialog.FileName); CancelSearch(); _game = saved.Board; _mode.SelectedIndex = saved.Mode; _paused = true; _reviewing = _game.Cursor < _game.Moves.Count; RefreshGame("棋谱已打开 · 点击继续或自由回看"); Persist(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException) { MessageBox.Show(this, e.Message, "无法打开棋谱", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        try { var saved = SessionFiles.Load(dialog.FileName); CancelSearch(); _game = saved.Board; _analysis = new(); _mode.SelectedIndex = saved.Mode; _paused = true; _reviewing = _game.Cursor < _game.Moves.Count; _diagnostics.Text = "尚未搜索\n读档后从新的 AI 决策开始统计。"; RefreshGame("棋谱已打开 · 点击继续或自由回看"); Persist(); }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException) { MessageBox.Show(this, e.Message, "无法打开棋谱", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
     private void SaveGame()
     {
@@ -328,7 +384,7 @@ internal sealed class MainForm : Form
             var saved = SessionFiles.Load(SessionFiles.AutoSavePath); _game = saved.Board; _mode.SelectedIndex = saved.Mode;
             _paused = true; _reviewing = _game.Cursor < _game.Moves.Count;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException) { SessionFiles.Log(e); }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException) { SessionFiles.Log(e); }
     }
     private void LoadShowcase()
     {
@@ -340,16 +396,25 @@ internal sealed class MainForm : Form
     private void ApplyStartupOptions(string[] args)
     {
         string? Value(string name) { int i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
-        foreach (var (name, combo) in new[] { ("--black-engine", _blackEngine), ("--white-engine", _whiteEngine) })
+        foreach (var (side, settings) in new[] { ("black", _blackSettings), ("white", _whiteSettings) })
         {
-            string? id = Value(name) ?? Value("--engine");
-            for (int i = 0; i < combo.Items.Count; i++) if (combo.Items[i] is EngineDescriptor item && item.Id == id) combo.SelectedIndex = i;
+            var profile = settings.Profile;
+            string? id = Value($"--{side}-engine") ?? Value("--engine");
+            string? evaluation = Value($"--{side}-evaluation") ?? Value("--evaluation");
+            profile = profile with
+            {
+                EngineId = EngineCatalog.All.Any(e => e.Id == id) ? id! : profile.EngineId,
+                Depth = int.TryParse(Value($"--{side}-depth") ?? Value("--depth"), out int depth) ? Math.Clamp(depth, 1, 8) : profile.Depth,
+                TimeBudgetMs = int.TryParse(Value($"--{side}-budget") ?? Value("--budget"), out int budget) ? Math.Clamp(budget, 250, 10000) : profile.TimeBudgetMs,
+                EvaluationId = evaluation is "patterns" or "quintuple" ? evaluation : profile.EvaluationId
+            };
+            settings.Profile = profile;
         }
-        if (int.TryParse(Value("--depth"), out int depth)) _depth.Value = Math.Clamp(depth, 1, 8);
-        if (int.TryParse(Value("--budget"), out int budget)) _budget.Value = Math.Clamp(budget, 250, 10000);
         if (Value("--size")?.Split('x') is [string w, string h] && int.TryParse(w, out int width) && int.TryParse(h, out int height)) ClientSize = new Size(Math.Clamp(width, 1060, 2400), Math.Clamp(height, 790, 1600));
+        if (_showcase && args.Contains("--empty-showcase")) _game.Reset();
         if (args.Contains("--autoplay")) { _mode.SelectedIndex = 3; _paused = false; }
-        SelectPage(Value("--page") switch { "engines" => 1, "online" => 2, _ => 0 });
+        if (int.TryParse(Value("--autoplay-plies"), out int plies) && plies > 0) _autoplayStopAt = (int)Math.Min(_game.Size * _game.Size, (long)_game.Cursor + plies);
+        SelectPage(Value("--page") switch { "engines" => 1, "stats" => 2, "online" => 3, _ => 0 });
     }
 
     private void BindNetwork()
@@ -362,7 +427,7 @@ internal sealed class MainForm : Form
             for (int i = 0; i < _rooms.Items.Count; i++) if (((RoomListing)_rooms.Items[i]).Name == selected) _rooms.SelectedIndex = i;
             _rooms.EndUpdate();
         };
-        _network.MatchStarted += match => { CancelSearch(); _online = true; _paused = true; _reviewing = false; _game = new GameBoard(match.BoardSize); RefreshGame(); };
+        _network.MatchStarted += match => { CancelSearch(); _online = true; _paused = true; _reviewing = false; _game = new GameBoard(match.BoardSize); _analysis = new(); _diagnostics.Text = "联机对局\n手动落子不计入 AI 思考统计。"; RefreshGame(); };
         _network.MoveReceived += move =>
         {
             if (!_online || _game.BlackToMove == _network.IsLocalBlack || move.Ply != _game.Cursor + 1 || !_game.TryPlay(move.X, move.Y))
@@ -382,7 +447,7 @@ internal sealed class MainForm : Form
         _network.RequestResolved += (kind, accepted) =>
         {
             if (!_online) return;
-            if (accepted) { if (kind == "restart") _game.Reset(); else _game.Undo(2); _board.HintMove = null; RefreshGame(); Persist(); }
+            if (accepted) { if (kind == "restart") { _game.Reset(); _analysis = new(); } else _game.Undo(2); _board.HintMove = null; RefreshGame(); Persist(); }
             else RefreshGame("请求未获同意或已超时，棋局保持原样");
         };
         _network.OpponentLeft += () => { _online = false; _paused = true; RefreshGame("对手已离开 · 可保存棋谱；离开房间后可继续本地对局"); };
@@ -414,7 +479,7 @@ internal sealed class MainForm : Form
     }
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _closing = true; CancelSearch(); Persist(); _networkTimer.Stop(); _networkTimer.Dispose(); _network.Dispose(); _tips.Dispose();
+        _closing = true; CancelSearch(); Persist(); PersistPreferences(); _networkTimer.Stop(); _networkTimer.Dispose(); _network.Dispose(); _tips.Dispose();
         base.OnFormClosing(e);
     }
 }
